@@ -32,22 +32,43 @@ class PinterestScraper:
             chrome_options.add_argument("--window-size=1920,1080")
             chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+            chrome_options.add_argument("--disable-extensions")
+            chrome_options.add_argument("--disable-plugins")
+            chrome_options.add_argument("--disable-images")
+            chrome_options.add_argument("--disable-javascript")
             chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
             chrome_options.add_experimental_option('useAutomationExtension', False)
             
-            # Try to initialize Chrome driver
+            # Try different ChromeDriver paths for Streamlit Cloud
+            driver_paths = [
+                "/usr/bin/chromedriver",
+                "/usr/local/bin/chromedriver", 
+                "chromedriver"
+            ]
+            
+            for driver_path in driver_paths:
+                try:
+                    self.driver = webdriver.Chrome(executable_path=driver_path, options=chrome_options)
+                    self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                    st.success("✅ Chrome driver initialized successfully")
+                    return True
+                except Exception as e:
+                    continue
+            
+            # If all paths fail, try without specifying path
             try:
                 self.driver = webdriver.Chrome(options=chrome_options)
                 self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
                 st.success("✅ Chrome driver initialized successfully")
                 return True
             except Exception as e:
-                st.error(f"❌ Chrome driver not available: {str(e)}")
-                st.info("💡 Using fallback image analysis mode")
+                st.warning(f"⚠️ Chrome driver not available: {str(e)}")
+                st.info("💡 Using demo mode with sample data")
                 return False
                 
         except Exception as e:
-            st.error(f"❌ Failed to setup Chrome driver: {str(e)}")
+            st.warning(f"⚠️ Failed to setup Chrome driver: {str(e)}")
+            st.info("💡 Using demo mode with sample data")
             return False
     
     def scrape_board(self, board_url, max_pins=30, progress_callback=None):
@@ -190,32 +211,47 @@ class PinterestScraper:
         
         all_colors = []
         analyzed_count = 0
+        failed_count = 0
         
         for i, pin in enumerate(pins_data[:max_images]):
             try:
-                # Check if demo colors already exist
-                if 'colors' in pin:
-                    all_colors.extend(pin['colors'])
+                # Always try to analyze real image first
+                colors = self.extract_colors_from_url(pin['image_url'])
+                if colors:
+                    all_colors.extend(colors)
                     analyzed_count += 1
+                    # Store colors in pin data
+                    pin['colors'] = colors
                 else:
-                    # Try to analyze real image
-                    colors = self.extract_colors_from_url(pin['image_url'])
-                    if colors:
-                        all_colors.extend(colors)
-                        analyzed_count += 1
+                    failed_count += 1
+                    # Use demo colors as fallback for this specific pin
+                    demo_colors = self.generate_demo_colors()
+                    all_colors.extend(demo_colors)
+                    pin['colors'] = demo_colors
+                    analyzed_count += 1
                 
                 # Update progress
                 progress = (i + 1) / min(len(pins_data), max_images)
                 progress_bar.progress(progress)
                 
             except Exception as e:
+                failed_count += 1
+                # Use demo colors as fallback
+                demo_colors = self.generate_demo_colors()
+                all_colors.extend(demo_colors)
+                pin['colors'] = demo_colors
+                analyzed_count += 1
                 continue
         
         progress_bar.empty()
-        st.success(f"✅ Successfully analyzed {analyzed_count} images")
+        
+        if failed_count > 0:
+            st.warning(f"⚠️ {failed_count} images failed to analyze, using fallback colors")
+        
+        st.success(f"✅ Successfully analyzed {analyzed_count} images ({analyzed_count - failed_count} real, {failed_count} fallback)")
         
         if not all_colors:
-            # Generate fallback colors
+            # Generate fallback colors if everything failed
             all_colors = self.generate_fallback_colors()
         
         # Aggregate and analyze colors
@@ -224,21 +260,46 @@ class PinterestScraper:
     def extract_colors_from_url(self, image_url):
         """Extract colors from image URL"""
         try:
-            # Download image
-            response = requests.get(image_url, timeout=10)
+            # Add headers to mimic browser request
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            }
+            
+            # Download image with timeout and headers
+            response = requests.get(image_url, timeout=15, headers=headers, stream=True)
             if response.status_code != 200:
+                return None
+            
+            # Check content type
+            content_type = response.headers.get('content-type', '')
+            if not content_type.startswith('image/'):
+                return None
+                
+            # Read image data
+            image_data = response.content
+            if len(image_data) < 1000:  # Too small to be a real image
                 return None
                 
             # Open image
-            image = Image.open(io.BytesIO(response.content))
+            image = Image.open(io.BytesIO(image_data))
             
             # Convert to RGB if necessary
             if image.mode != 'RGB':
                 image = image.convert('RGB')
             
+            # Resize if too large (for performance)
+            if image.width > 800 or image.height > 800:
+                image.thumbnail((800, 800), Image.Resampling.LANCZOS)
+            
             # Extract dominant colors using ColorThief
-            color_thief = ColorThief(io.BytesIO(response.content))
-            dominant_colors = color_thief.get_palette(color_count=5, quality=1)
+            color_thief = ColorThief(io.BytesIO(image_data))
+            dominant_colors = color_thief.get_palette(color_count=6, quality=1)
             
             # Convert to hex and get color names
             colors = []
@@ -254,6 +315,7 @@ class PinterestScraper:
             return colors
             
         except Exception as e:
+            # Return None to trigger fallback
             return None
     
     def get_color_name(self, rgb_color):
