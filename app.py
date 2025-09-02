@@ -393,18 +393,37 @@ def main():
         board_url = st.text_input(
             "📌 Pinterest Board URL",
             placeholder="https://pinterest.com/username/board-name/",
-            help="Enter the URL of any public Pinterest board"
+            help="Enter the URL of any public Pinterest board (with or without www)"
         )
         
         analyze_button = st.button("🔍 Analyze Board", type="primary")
+        
+        # Clear cache button
+        if st.button("🗑️ Clear Cache", help="Clear previous analysis results"):
+            # Clear all session state
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.success("Cache cleared!")
+            st.rerun()
     
     # Main content
     if analyze_button and board_url:
-        if not board_url.startswith('https://pinterest.com/'):
+        # Normalize URL
+        normalized_url = normalize_pinterest_url(board_url)
+        
+        if not normalized_url:
             st.error("❌ Please enter a valid Pinterest board URL")
+            st.info("💡 Examples: https://pinterest.com/username/board-name/ or https://www.pinterest.com/username/board-name/")
             return
+        
+        # Clear previous results for new analysis
+        if 'analysis_results' in st.session_state:
+            del st.session_state['analysis_results']
+        if 'progress_messages' in st.session_state:
+            del st.session_state['progress_messages']
             
         st.session_state.start_time = time.time()
+        st.session_state.current_url = normalized_url
         
         # Create progress container
         st._progress_container = st.container()
@@ -413,15 +432,18 @@ def main():
         analyzer = PinterestBoardAnalyzer()
         
         # Perform analysis
-        results = analyzer.analyze_pinterest_board(board_url)
+        results = analyzer.analyze_pinterest_board(normalized_url)
         
         if results:
+            # Store results in session state
+            st.session_state.analysis_results = results
             # Display results
             display_analysis_results(results)
     
     elif 'analysis_results' in st.session_state:
-        # Display cached results
-        display_analysis_results(st.session_state.analysis_results)
+        # Only display cached results if they exist and no new analysis was requested
+        if not analyze_button:
+            display_analysis_results(st.session_state.analysis_results)
     
     else:
         # Welcome message
@@ -437,14 +459,42 @@ def main():
         - **🌍 Cultural Insights**: Trend predictions and cultural analysis
         
         **Instructions:**
-        1. Enter a Pinterest board URL in the sidebar
+        1. Enter a Pinterest board URL in the sidebar (with or without www)
         2. Click "Analyze Board" to start the analysis
         3. View comprehensive results and download data
         
         **Example URLs:**
         - `https://pinterest.com/pinterest/summer-cycling-apparel/`
-        - `https://pinterest.com/username/board-name/`
+        - `https://www.pinterest.com/username/board-name/`
+        - `pinterest.com/username/board-name/` (protocol will be added automatically)
         """)
+
+def normalize_pinterest_url(url):
+    """Normalize Pinterest URL to handle various formats"""
+    if not url:
+        return None
+        
+    # Remove whitespace
+    url = url.strip()
+    
+    # Add protocol if missing
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+    
+    # Normalize domain variations
+    url = url.replace('http://pinterest.com', 'https://pinterest.com')
+    url = url.replace('http://www.pinterest.com', 'https://pinterest.com')
+    url = url.replace('https://www.pinterest.com', 'https://pinterest.com')
+    
+    # Validate Pinterest URL format
+    if not ('pinterest.com/' in url and url.count('/') >= 4):
+        return None
+        
+    # Ensure trailing slash
+    if not url.endswith('/'):
+        url += '/'
+        
+    return url
 
 def display_analysis_results(results):
     """Display comprehensive analysis results"""
