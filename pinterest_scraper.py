@@ -31,8 +31,6 @@ class PinterestScraper:
             chrome_options.add_argument("--window-size=1920,1080")
             chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-            chrome_options.add_argument("--disable-extensions")
-            chrome_options.add_argument("--disable-plugins")
             chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
             chrome_options.add_experimental_option('useAutomationExtension', False)
             
@@ -68,17 +66,8 @@ class PinterestScraper:
             st.info("💡 Using demo mode with sample data")
             return False
     
-    def check_for_more_like_this(self):
-        """Check if we've reached the 'More Like This' section"""
-        try:
-            # Simple check for "More like this" text in page source
-            page_text = self.driver.page_source.lower()
-            return "more like this" in page_text or "more ideas" in page_text
-        except:
-            return False
-    
-    def scrape_board(self, board_url, max_pins=60, progress_callback=None):
-        """Scrape Pinterest board for pin data - stops at 'More Like This' section"""
+    def scrape_board(self, board_url, max_pins=80, progress_callback=None):
+        """Scrape Pinterest board for pin data"""
         try:
             if not self.driver:
                 return self.get_demo_data(board_url, progress_callback)
@@ -91,20 +80,13 @@ class PinterestScraper:
             
             pins_data = []
             scroll_count = 0
-            max_scrolls = 8
+            max_scrolls = 12
             consecutive_no_new_pins = 0
+            last_pin_count = 0
             
-            while scroll_count < max_scrolls and consecutive_no_new_pins < 3:
-                # Check if we've reached "More Like This" section BEFORE processing pins
-                if scroll_count > 2 and self.check_for_more_like_this():
-                    if progress_callback:
-                        progress_callback("🛑 Reached 'More Like This' section - stopping to avoid recommended pins")
-                    break
-                
-                # Find pin elements - use simple selector
+            while scroll_count < max_scrolls and consecutive_no_new_pins < 4:
+                # Find pin elements
                 pin_elements = self.driver.find_elements(By.CSS_SELECTOR, '[data-test-id="pin"]')
-                
-                initial_count = len(pins_data)
                 
                 if progress_callback:
                     if scroll_count == 0:
@@ -112,7 +94,7 @@ class PinterestScraper:
                     else:
                         progress_callback(f"📌 Loaded {len(pin_elements)} pins after scroll {scroll_count}")
                 
-                # Extract image URLs from ALL pins (no filtering)
+                # Extract image URLs
                 for pin in pin_elements:
                     if len(pins_data) >= max_pins:
                         break
@@ -121,10 +103,10 @@ class PinterestScraper:
                         img_element = pin.find_element(By.TAG_NAME, "img")
                         img_url = img_element.get_attribute("src")
                         
-                        # Only skip obvious placeholders and duplicates
+                        # Accept all Pinterest images
                         if (img_url and 
                             img_url not in [p.get('image_url') for p in pins_data] and
-                            'pinimg.com' in img_url):
+                            ('pinimg.com' in img_url or 'i.pinimg.com' in img_url)):
                             
                             pins_data.append({
                                 'image_url': img_url,
@@ -134,29 +116,30 @@ class PinterestScraper:
                     except:
                         continue
                 
-                new_pins_found = len(pins_data) - initial_count
-                
-                # Check if we found new pins
-                if new_pins_found == 0:
+                # Check if we're getting new pins
+                current_pin_count = len(pins_data)
+                if current_pin_count == last_pin_count:
                     consecutive_no_new_pins += 1
                 else:
                     consecutive_no_new_pins = 0
+                    last_pin_count = current_pin_count
+                
+                # Stop if we have enough pins or hit "More Like This"
+                page_source = self.driver.page_source.lower()
+                if scroll_count > 4 and ("more like this" in page_source or "more ideas" in page_source):
+                    if progress_callback:
+                        progress_callback("🛑 Reached 'More Like This' section - stopping")
+                    break
                 
                 # Scroll to load more pins
-                if len(pins_data) < max_pins and consecutive_no_new_pins < 3:
-                    self.driver.execute_script("window.scrollBy(0, window.innerHeight/2);")
-                    time.sleep(2)
+                if len(pins_data) < max_pins and consecutive_no_new_pins < 4:
+                    self.driver.execute_script("window.scrollBy(0, window.innerHeight);")
+                    time.sleep(3)
                     scroll_count += 1
                 else:
                     break
             
             if progress_callback:
-                if self.check_for_more_like_this():
-                    progress_callback("✅ Stopped at end of board (before recommendations)")
-                elif consecutive_no_new_pins >= 3:
-                    progress_callback("✅ Reached end of board - no more pins found")
-                else:
-                    progress_callback(f"✅ Collected maximum pins ({max_pins})")
                 progress_callback(f"🎯 Found {len(pins_data)} total pins in the board")
             
             return pins_data
@@ -242,7 +225,7 @@ class PinterestScraper:
         for i, pin in enumerate(pins_data[:max_images]):
             try:
                 colors = self.extract_colors_from_url(pin['image_url'])
-                if colors:
+                if colors and len(colors) > 0:
                     all_colors.extend(colors)
                     analyzed_count += 1
                     pin['colors'] = colors
@@ -266,10 +249,11 @@ class PinterestScraper:
         
         progress_bar.empty()
         
+        real_analyzed = analyzed_count - failed_count
         if failed_count > 0:
             st.warning(f"⚠️ {failed_count} images failed to analyze, using fallback colors")
         
-        st.success(f"✅ Successfully analyzed {analyzed_count} images ({analyzed_count - failed_count} real, {failed_count} fallback)")
+        st.success(f"✅ Successfully analyzed {analyzed_count} images ({real_analyzed} real, {failed_count} fallback)")
         
         if not all_colors:
             all_colors = self.generate_fallback_colors()
@@ -279,26 +263,17 @@ class PinterestScraper:
     def extract_colors_from_url(self, image_url):
         """Extract colors from image URL"""
         try:
+            # Simple headers
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
             
-            response = requests.get(image_url, timeout=15, headers=headers, stream=True)
+            response = requests.get(image_url, timeout=10, headers=headers)
             if response.status_code != 200:
-                return None
-            
-            content_type = response.headers.get('content-type', '')
-            if not content_type.startswith('image/'):
                 return None
                 
             image_data = response.content
-            if len(image_data) < 1000:
+            if len(image_data) < 500:
                 return None
                 
             image = Image.open(io.BytesIO(image_data))
@@ -306,11 +281,12 @@ class PinterestScraper:
             if image.mode != 'RGB':
                 image = image.convert('RGB')
             
-            if image.width > 800 or image.height > 800:
-                image.thumbnail((800, 800), Image.Resampling.LANCZOS)
+            # Resize for faster processing
+            if image.width > 400 or image.height > 400:
+                image.thumbnail((400, 400), Image.Resampling.LANCZOS)
             
             color_thief = ColorThief(io.BytesIO(image_data))
-            dominant_colors = color_thief.get_palette(color_count=6, quality=1)
+            dominant_colors = color_thief.get_palette(color_count=5, quality=1)
             
             colors = []
             for rgb in dominant_colors:
@@ -333,75 +309,79 @@ class PinterestScraper:
             color_name = webcolors.rgb_to_name(rgb_color)
             return color_name.title()
         except ValueError:
-            min_colors = {}
-            for key, name in webcolors.CSS3_HEX_TO_NAMES.items():
-                r_c, g_c, b_c = webcolors.hex_to_rgb(key)
-                rd = (r_c - rgb_color[0]) ** 2
-                gd = (g_c - rgb_color[1]) ** 2
-                bd = (b_c - rgb_color[2]) ** 2
-                min_colors[(rd + gd + bd)] = name
-            
-            closest_color = min_colors[min(min_colors.keys())]
-            return closest_color.title()
+            # Simple color mapping for common colors
+            r, g, b = rgb_color
+            if r > 200 and g > 200 and b > 200:
+                return "White"
+            elif r < 50 and g < 50 and b < 50:
+                return "Black"
+            elif r > g and r > b:
+                return "Red"
+            elif g > r and g > b:
+                return "Green"
+            elif b > r and b > g:
+                return "Blue"
+            elif r > 150 and g > 150:
+                return "Yellow"
+            elif r > 100 and g < 100 and b < 100:
+                return "Brown"
+            else:
+                return "Gray"
     
     def generate_fallback_colors(self):
         """Generate fallback colors when image analysis fails"""
         fallback_colors = [
             {'hex': '#8B7E73', 'name': 'Gray', 'rgb': (139, 126, 115)},
             {'hex': '#DAD5D2', 'name': 'Lightgray', 'rgb': (218, 213, 210)},
-            {'hex': '#634135', 'name': 'Darkolivegreen', 'rgb': (99, 65, 53)},
+            {'hex': '#634135', 'name': 'Brown', 'rgb': (99, 65, 53)},
             {'hex': '#B3B1AE', 'name': 'Darkgray', 'rgb': (179, 177, 174)},
-            {'hex': '#342B1D', 'name': 'Darkslategray', 'rgb': (52, 43, 29)},
-            {'hex': '#746041', 'name': 'Darkolivegreen', 'rgb': (116, 96, 65)},
-            {'hex': '#C49D88', 'name': 'Rosybrown', 'rgb': (196, 157, 136)},
-            {'hex': '#52787B', 'name': 'Dimgray', 'rgb': (82, 120, 123)},
-            {'hex': '#B7895A', 'name': 'Peru', 'rgb': (183, 137, 90)},
-            {'hex': '#C05658', 'name': 'Indianred', 'rgb': (192, 86, 88)}
+            {'hex': '#342B1D', 'name': 'Black', 'rgb': (52, 43, 29)}
         ]
         
         return fallback_colors
     
     def aggregate_colors(self, all_colors):
-        """Aggregate and analyze color data - SIMPLE VERSION"""
+        """Aggregate and analyze color data"""
         if not all_colors:
             return {
                 'dominant_colors': [
-                    {'hex': '#8B7E73', 'name': 'Gray', 'percentage': 25.0, 'count': 1},
-                    {'hex': '#DAD5D2', 'name': 'Lightgray', 'percentage': 20.0, 'count': 1},
-                    {'hex': '#634135', 'name': 'Darkolivegreen', 'percentage': 15.0, 'count': 1}
+                    {'hex': '#8B7E73', 'name': 'Gray', 'percentage': 100.0, 'count': 1}
                 ],
-                'total_colors_analyzed': 4,
-                'unique_colors': 3
+                'total_colors_analyzed': 1,
+                'unique_colors': 1
             }
         
         try:
-            # Count colors
-            color_map = {}
+            color_counts = {}
             total = 0
             
             for color in all_colors:
-                if color and isinstance(color, dict) and 'hex' in color and 'name' in color:
+                if color and 'hex' in color and 'name' in color:
                     hex_code = color['hex']
                     name = color['name']
                     total += 1
                     
-                    if hex_code in color_map:
-                        color_map[hex_code]['count'] += 1
+                    if hex_code in color_counts:
+                        color_counts[hex_code]['count'] += 1
                     else:
-                        color_map[hex_code] = {'hex': hex_code, 'name': name, 'count': 1}
+                        color_counts[hex_code] = {
+                            'hex': hex_code,
+                            'name': name,
+                            'count': 1
+                        }
             
             if total == 0:
                 return {
                     'dominant_colors': [
-                        {'hex': '#8B7E73', 'name': 'Gray', 'percentage': 25.0, 'count': 1}
+                        {'hex': '#8B7E73', 'name': 'Gray', 'percentage': 100.0, 'count': 1}
                     ],
                     'total_colors_analyzed': 1,
                     'unique_colors': 1
                 }
             
-            # Create result list
+            # Create result
             result_colors = []
-            for color_info in color_map.values():
+            for color_info in color_counts.values():
                 percentage = (color_info['count'] / total) * 100
                 result_colors.append({
                     'hex': color_info['hex'],
@@ -416,11 +396,10 @@ class PinterestScraper:
             return {
                 'dominant_colors': result_colors[:10],
                 'total_colors_analyzed': total,
-                'unique_colors': len(color_map)
+                'unique_colors': len(color_counts)
             }
             
         except Exception as e:
-            st.error(f"Color aggregation error: {str(e)}")
             return {
                 'dominant_colors': [
                     {'hex': '#8B7E73', 'name': 'Gray', 'percentage': 100.0, 'count': 1}
