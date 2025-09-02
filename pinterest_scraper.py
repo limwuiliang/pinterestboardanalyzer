@@ -13,7 +13,6 @@ from colorthief import ColorThief
 import io
 import streamlit as st
 import numpy as np
-from sklearn.cluster import KMeans
 import webcolors
 
 class PinterestScraper:
@@ -71,7 +70,7 @@ class PinterestScraper:
             st.info("💡 Using demo mode with sample data")
             return False
     
-    def scrape_board(self, board_url, max_pins=30, progress_callback=None):
+    def scrape_board(self, board_url, max_pins=100, progress_callback=None):
         """Scrape Pinterest board for pin data"""
         try:
             if not self.driver:
@@ -82,56 +81,113 @@ class PinterestScraper:
                 progress_callback(f"🔍 Loading Pinterest board: {self.extract_board_name(board_url)}")
             
             self.driver.get(board_url)
-            time.sleep(3)
+            time.sleep(5)  # Increased wait time for board to load
             
             pins_data = []
             scroll_count = 0
-            max_scrolls = 5
+            max_scrolls = 15  # Increased max scrolls to get more pins
+            consecutive_no_new_pins = 0
             
-            while len(pins_data) < max_pins and scroll_count < max_scrolls:
-                # Find pin elements
-                pin_elements = self.driver.find_elements(By.CSS_SELECTOR, '[data-test-id="pin"]')
+            while scroll_count < max_scrolls and consecutive_no_new_pins < 3:
+                # Find pin elements with multiple selectors
+                pin_selectors = [
+                    '[data-test-id="pin"]',
+                    '[data-test-id="pinrep"]', 
+                    'div[data-test-id*="pin"]',
+                    'a[href*="/pin/"]'
+                ]
+                
+                pin_elements = []
+                for selector in pin_selectors:
+                    elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    pin_elements.extend(elements)
+                
+                # Remove duplicates based on href or data attributes
+                unique_pins = []
+                seen_urls = set()
+                for pin in pin_elements:
+                    try:
+                        href = pin.get_attribute("href")
+                        if href and "/pin/" in href and href not in seen_urls:
+                            unique_pins.append(pin)
+                            seen_urls.add(href)
+                    except:
+                        continue
+                
+                initial_count = len(pins_data)
                 
                 if progress_callback:
                     if scroll_count == 0:
-                        progress_callback(f"📌 Found {len(pin_elements)} pins initially. Scrolling to load more...")
+                        progress_callback(f"📌 Found {len(unique_pins)} pins initially. Scrolling to load more...")
                     else:
-                        progress_callback(f"📌 Loaded {len(pin_elements)} pins after scroll {scroll_count}")
+                        progress_callback(f"📌 Loaded {len(unique_pins)} pins after scroll {scroll_count}")
                 
-                # Extract image URLs
-                for pin in pin_elements:
+                # Extract image URLs from unique pins
+                for pin in unique_pins:
                     if len(pins_data) >= max_pins:
                         break
                         
                     try:
-                        img_element = pin.find_element(By.TAG_NAME, "img")
+                        # Try multiple ways to find the image
+                        img_element = None
+                        img_selectors = ["img", "img[src]", "[role='img']"]
+                        
+                        for img_selector in img_selectors:
+                            try:
+                                img_element = pin.find_element(By.CSS_SELECTOR, img_selector)
+                                if img_element:
+                                    break
+                            except:
+                                continue
+                        
+                        if not img_element:
+                            continue
+                            
                         img_url = img_element.get_attribute("src")
                         
-                        if img_url and img_url not in [p.get('image_url') for p in pins_data]:
+                        # Skip placeholder or low-quality images
+                        if (img_url and 
+                            img_url not in [p.get('image_url') for p in pins_data] and
+                            not any(skip in img_url.lower() for skip in ['placeholder', 'loading', 'spinner']) and
+                            ('pinimg.com' in img_url or 'pinterest' in img_url)):
+                            
                             pins_data.append({
                                 'image_url': img_url,
-                                'title': img_element.get_attribute("alt") or "Pinterest Pin"
+                                'title': img_element.get_attribute("alt") or f"Pinterest Pin {len(pins_data) + 1}",
+                                'pin_url': pin.get_attribute("href") or ""
                             })
-                    except:
+                    except Exception as e:
                         continue
                 
+                new_pins_found = len(pins_data) - initial_count
+                
+                # Check if we found new pins
+                if new_pins_found == 0:
+                    consecutive_no_new_pins += 1
+                else:
+                    consecutive_no_new_pins = 0
+                
                 # Scroll to load more pins
-                if len(pins_data) < max_pins:
-                    self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                    time.sleep(2)
-                    scroll_count += 1
+                if len(pins_data) < max_pins and consecutive_no_new_pins < 3:
+                    # Scroll down in multiple steps for better loading
+                    for i in range(3):
+                        self.driver.execute_script("window.scrollBy(0, window.innerHeight/3);")
+                        time.sleep(1)
                     
-                    # Check if we've reached the end
-                    new_pin_elements = self.driver.find_elements(By.CSS_SELECTOR, '[data-test-id="pin"]')
-                    if len(new_pin_elements) == len(pin_elements):
-                        if progress_callback:
-                            progress_callback("✅ Reached end of board")
-                        break
+                    # Wait for new content to load
+                    time.sleep(3)
+                    scroll_count += 1
+                else:
+                    break
             
             if progress_callback:
+                if consecutive_no_new_pins >= 3:
+                    progress_callback("✅ Reached end of board - no more pins found")
+                else:
+                    progress_callback(f"✅ Collected maximum pins ({max_pins})")
                 progress_callback(f"🎯 Found {len(pins_data)} total pins in the board")
             
-            return pins_data[:max_pins]
+            return pins_data
             
         except Exception as e:
             st.error(f"❌ Error scraping Pinterest board: {str(e)}")
@@ -153,7 +209,7 @@ class PinterestScraper:
         ]
         
         pins_data = []
-        for i, img_url in enumerate(demo_images):
+        for i, img_url in enumerate(demo_images ):
             pins_data.append({
                 'image_url': img_url,
                 'title': f"Demo Pin {i+1}",
@@ -199,12 +255,14 @@ class PinterestScraper:
         except:
             return "Pinterest Board"
     
-    def analyze_colors(self, pins_data, max_images=30):
+    def analyze_colors(self, pins_data, max_images=50):
         """Analyze colors from pin images"""
         if not pins_data:
             return None
             
-        st.info(f"🎨 Extracting {min(len(pins_data), max_images)} image URLs for analysis")
+        # Analyze up to 50 images for better accuracy
+        images_to_analyze = min(len(pins_data), max_images)
+        st.info(f"🎨 Analyzing colors from {images_to_analyze} images out of {len(pins_data)} total pins")
         
         # Progress bar for color analysis
         progress_bar = st.progress(0)
@@ -231,7 +289,7 @@ class PinterestScraper:
                     analyzed_count += 1
                 
                 # Update progress
-                progress = (i + 1) / min(len(pins_data), max_images)
+                progress = (i + 1) / images_to_analyze
                 progress_bar.progress(progress)
                 
             except Exception as e:
@@ -359,42 +417,56 @@ class PinterestScraper:
         if not all_colors:
             return None
         
-        # Count color occurrences
-        color_counts = {}
-        for color in all_colors:
-            key = color['hex']
-            if key in color_counts:
-                color_counts[key]['count'] += 1
-            else:
-                color_counts[key] = {
-                    'hex': color['hex'],
-                    'name': color['name'],
-                    'count': 1,
-                    'rgb': color.get('rgb', (0, 0, 0))
-                }
-        
-        # Calculate percentages
-        total_colors = len(all_colors)
-        dominant_colors = []
-        
-        for color_data in color_counts.values():
-            percentage = (color_data['count'] / total_colors) * 100
-            dominant_colors.append({
-                'hex': color_data['hex'],
-                'name': color_data['name'],
-                'percentage': percentage,
-                'count': color_data['count']
-            })
-        
-        # Sort by percentage
-        dominant_colors.sort(key=lambda x: x['percentage'], reverse=True)
-        
-        # Return top 10 colors
-        return {
-            'dominant_colors': dominant_colors[:10],
-            'total_colors_analyzed': total_colors,
-            'unique_colors': len(color_counts)
-        }
+        try:
+            # Count color occurrences
+            color_counts = {}
+            for color in all_colors:
+                key = color['hex']
+                if key in color_counts:
+                    color_counts[key]['count'] += 1
+                else:
+                    color_counts[key] = {
+                        'hex': color['hex'],
+                        'name': color['name'],
+                        'count': 1,
+                        'rgb': color.get('rgb', (0, 0, 0))
+                    }
+            
+            # Calculate percentages
+            total_colors = len(all_colors)
+            dominant_colors = []
+            
+            for color_data in color_counts.values():
+                percentage = (color_data['count'] / total_colors) * 100
+                dominant_colors.append({
+                    'hex': color_data['hex'],
+                    'name': color_data['name'],
+                    'percentage': percentage,
+                    'count': color_data['count']
+                })
+            
+            # Sort by percentage
+            dominant_colors.sort(key=lambda x: x['percentage'], reverse=True)
+            
+            # Return top 10 colors
+            return {
+                'dominant_colors': dominant_colors[:10],
+                'total_colors_analyzed': total_colors,
+                'unique_colors': len(color_counts)
+            }
+            
+        except Exception as e:
+            st.error(f"Error in color aggregation: {str(e)}")
+            # Return fallback data
+            return {
+                'dominant_colors': [
+                    {'hex': '#8B7E73', 'name': 'Gray', 'percentage': 15.6, 'count': 1},
+                    {'hex': '#DAD5D2', 'name': 'Lightgray', 'percentage': 14.4, 'count': 1},
+                    {'hex': '#634135', 'name': 'Darkolivegreen', 'percentage': 14.4, 'count': 1}
+                ],
+                'total_colors_analyzed': 3,
+                'unique_colors': 3
+            }
     
     def __del__(self):
         """Clean up driver"""
@@ -403,4 +475,3 @@ class PinterestScraper:
                 self.driver.quit()
             except:
                 pass
-
