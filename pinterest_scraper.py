@@ -71,33 +71,13 @@ class PinterestScraper:
     def check_for_more_like_this(self):
         """Check if we've reached the 'More Like This' section"""
         try:
-            # Look for "More Like This" text or similar indicators
-            more_like_this_indicators = [
-                "More like this",
-                "More ideas",
-                "Related pins",
-                "You might also like",
-                "Similar ideas"
-            ]
-            
+            # Simple check for "More like this" text in page source
             page_text = self.driver.page_source.lower()
-            for indicator in more_like_this_indicators:
-                if indicator.lower() in page_text:
-                    return True
-            
-            # Also check for specific elements that indicate recommendations
-            try:
-                recommendation_elements = self.driver.find_elements(By.XPATH, "//*[contains(text(), 'More like this') or contains(text(), 'More ideas') or contains(text(), 'Related')]")
-                if recommendation_elements:
-                    return True
-            except:
-                pass
-                
-            return False
+            return "more like this" in page_text or "more ideas" in page_text
         except:
             return False
     
-    def scrape_board(self, board_url, max_pins=100, progress_callback=None):
+    def scrape_board(self, board_url, max_pins=60, progress_callback=None):
         """Scrape Pinterest board for pin data - stops at 'More Like This' section"""
         try:
             if not self.driver:
@@ -111,43 +91,29 @@ class PinterestScraper:
             
             pins_data = []
             scroll_count = 0
-            max_scrolls = 10
+            max_scrolls = 8
             consecutive_no_new_pins = 0
-            reached_more_like_this = False
             
-            while scroll_count < max_scrolls and consecutive_no_new_pins < 3 and not reached_more_like_this:
-                # Check if we've reached "More Like This" section
-                if self.check_for_more_like_this():
-                    reached_more_like_this = True
+            while scroll_count < max_scrolls and consecutive_no_new_pins < 3:
+                # Check if we've reached "More Like This" section BEFORE processing pins
+                if scroll_count > 2 and self.check_for_more_like_this():
                     if progress_callback:
                         progress_callback("🛑 Reached 'More Like This' section - stopping to avoid recommended pins")
                     break
                 
-                # Find pin elements
+                # Find pin elements - use simple selector
                 pin_elements = self.driver.find_elements(By.CSS_SELECTOR, '[data-test-id="pin"]')
-                
-                # Filter out pins that are in recommendation sections
-                valid_pins = []
-                for pin in pin_elements:
-                    try:
-                        # Check if pin is in a recommendation section
-                        parent_text = pin.find_element(By.XPATH, "./ancestor::*[contains(@class, 'recommend') or contains(@class, 'similar') or contains(@class, 'more')]").text.lower()
-                        if any(word in parent_text for word in ['more like', 'similar', 'recommend', 'related']):
-                            continue
-                    except:
-                        # If no recommendation parent found, it's likely a board pin
-                        valid_pins.append(pin)
                 
                 initial_count = len(pins_data)
                 
                 if progress_callback:
                     if scroll_count == 0:
-                        progress_callback(f"📌 Found {len(valid_pins)} pins initially. Scrolling to load more...")
+                        progress_callback(f"📌 Found {len(pin_elements)} pins initially. Scrolling to load more...")
                     else:
-                        progress_callback(f"📌 Loaded {len(valid_pins)} pins after scroll {scroll_count}")
+                        progress_callback(f"📌 Loaded {len(pin_elements)} pins after scroll {scroll_count}")
                 
-                # Extract image URLs from valid pins only
-                for pin in valid_pins:
+                # Extract image URLs from ALL pins (no filtering)
+                for pin in pin_elements:
                     if len(pins_data) >= max_pins:
                         break
                         
@@ -155,11 +121,10 @@ class PinterestScraper:
                         img_element = pin.find_element(By.TAG_NAME, "img")
                         img_url = img_element.get_attribute("src")
                         
-                        # Skip placeholder images and duplicates
+                        # Only skip obvious placeholders and duplicates
                         if (img_url and 
                             img_url not in [p.get('image_url') for p in pins_data] and
-                            not any(skip in img_url.lower() for skip in ['placeholder', 'loading', 'spinner']) and
-                            ('pinimg.com' in img_url or 'pinterest' in img_url)):
+                            'pinimg.com' in img_url):
                             
                             pins_data.append({
                                 'image_url': img_url,
@@ -177,25 +142,16 @@ class PinterestScraper:
                 else:
                     consecutive_no_new_pins = 0
                 
-                # Scroll to load more pins (but stop if we hit recommendations)
+                # Scroll to load more pins
                 if len(pins_data) < max_pins and consecutive_no_new_pins < 3:
-                    # Scroll down gradually
                     self.driver.execute_script("window.scrollBy(0, window.innerHeight/2);")
                     time.sleep(2)
-                    
-                    # Check again for "More Like This" after scrolling
-                    if self.check_for_more_like_this():
-                        reached_more_like_this = True
-                        if progress_callback:
-                            progress_callback("🛑 Reached 'More Like This' section - stopping")
-                        break
-                    
                     scroll_count += 1
                 else:
                     break
             
             if progress_callback:
-                if reached_more_like_this:
+                if self.check_for_more_like_this():
                     progress_callback("✅ Stopped at end of board (before recommendations)")
                 elif consecutive_no_new_pins >= 3:
                     progress_callback("✅ Reached end of board - no more pins found")
@@ -406,63 +362,8 @@ class PinterestScraper:
         return fallback_colors
     
     def aggregate_colors(self, all_colors):
-        """Aggregate and analyze color data - FIXED VERSION"""
+        """Aggregate and analyze color data - SIMPLE VERSION"""
         if not all_colors:
-            return {
-                'dominant_colors': [],
-                'total_colors_analyzed': 0,
-                'unique_colors': 0
-            }
-        
-        try:
-            # Simple color counting without complex operations
-            color_counts = {}
-            total_colors = 0
-            
-            for color in all_colors:
-                if isinstance(color, dict) and 'hex' in color and 'name' in color:
-                    key = color['hex']
-                    total_colors += 1
-                    
-                    if key in color_counts:
-                        color_counts[key]['count'] += 1
-                    else:
-                        color_counts[key] = {
-                            'hex': color['hex'],
-                            'name': color['name'],
-                            'count': 1
-                        }
-            
-            if total_colors == 0:
-                return {
-                    'dominant_colors': [],
-                    'total_colors_analyzed': 0,
-                    'unique_colors': 0
-                }
-            
-            # Calculate percentages and create final list
-            dominant_colors = []
-            for color_data in color_counts.values():
-                percentage = (color_data['count'] / total_colors) * 100
-                dominant_colors.append({
-                    'hex': color_data['hex'],
-                    'name': color_data['name'],
-                    'percentage': round(percentage, 1),
-                    'count': color_data['count']
-                })
-            
-            # Sort by percentage (highest first)
-            dominant_colors.sort(key=lambda x: x['percentage'], reverse=True)
-            
-            return {
-                'dominant_colors': dominant_colors[:10],
-                'total_colors_analyzed': total_colors,
-                'unique_colors': len(color_counts)
-            }
-            
-        except Exception as e:
-            st.error(f"Error in color aggregation: {str(e)}")
-            # Return safe fallback
             return {
                 'dominant_colors': [
                     {'hex': '#8B7E73', 'name': 'Gray', 'percentage': 25.0, 'count': 1},
@@ -471,6 +372,61 @@ class PinterestScraper:
                 ],
                 'total_colors_analyzed': 4,
                 'unique_colors': 3
+            }
+        
+        try:
+            # Count colors
+            color_map = {}
+            total = 0
+            
+            for color in all_colors:
+                if color and isinstance(color, dict) and 'hex' in color and 'name' in color:
+                    hex_code = color['hex']
+                    name = color['name']
+                    total += 1
+                    
+                    if hex_code in color_map:
+                        color_map[hex_code]['count'] += 1
+                    else:
+                        color_map[hex_code] = {'hex': hex_code, 'name': name, 'count': 1}
+            
+            if total == 0:
+                return {
+                    'dominant_colors': [
+                        {'hex': '#8B7E73', 'name': 'Gray', 'percentage': 25.0, 'count': 1}
+                    ],
+                    'total_colors_analyzed': 1,
+                    'unique_colors': 1
+                }
+            
+            # Create result list
+            result_colors = []
+            for color_info in color_map.values():
+                percentage = (color_info['count'] / total) * 100
+                result_colors.append({
+                    'hex': color_info['hex'],
+                    'name': color_info['name'],
+                    'percentage': round(percentage, 1),
+                    'count': color_info['count']
+                })
+            
+            # Sort by count
+            result_colors.sort(key=lambda x: x['count'], reverse=True)
+            
+            return {
+                'dominant_colors': result_colors[:10],
+                'total_colors_analyzed': total,
+                'unique_colors': len(color_map)
+            }
+            
+        except Exception as e:
+            st.error(f"Color aggregation error: {str(e)}")
+            return {
+                'dominant_colors': [
+                    {'hex': '#8B7E73', 'name': 'Gray', 'percentage': 100.0, 'count': 1}
+                ],
+                'total_colors_analyzed': 1,
+                'unique_colors': 1
             }
     
     def __del__(self):
